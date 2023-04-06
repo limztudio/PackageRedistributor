@@ -5,9 +5,12 @@
 #include <filesystem>
 #include <vector>
 #include <deque>
+#include <unordered_set>
+#include <unordered_map>
 
 #include "sha2.h"
 
+#include <ppl.h>
 #include <Windows.h>
 
 
@@ -70,7 +73,21 @@ void PushLog(const TCHAR* Format, ...)
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
 
+namespace __hidden_File
+{
+	struct EqualTo{
+		bool operator()(const std::filesystem::path& Lhs, const std::filesystem::path& Rhs) const
+		{
+			return std::filesystem::equivalent(Lhs, Rhs);
+		}
+	};
+};
+
 typedef std::unique_ptr<FILE, decltype(&fclose)> FilePtr;
+
+using PathSet = std::unordered_set<std::filesystem::path, std::hash<std::filesystem::path>, __hidden_File::EqualTo>;
+template <typename Value>
+using PathMap = std::unordered_map<std::filesystem::path, Value, std::hash<std::filesystem::path>, __hidden_File::EqualTo>;
 
 FilePtr OpenFile(const std::filesystem::path& FilePath, const TCHAR* Mode)
 {
@@ -78,7 +95,7 @@ FilePtr OpenFile(const std::filesystem::path& FilePath, const TCHAR* Mode)
 	_tfopen_s(&File, FilePath.string<TCHAR>().c_str(), Mode);
 	return FilePtr(File, fclose);
 }
-std::filesystem::path ReadFileLine(FilePtr& File)
+std::basic_string<TCHAR> ReadFileStringLine(FilePtr& File)
 {
 	std::basic_string<TCHAR> TmpString;
 	while (!feof(File.get()))
@@ -99,9 +116,69 @@ std::filesystem::path ReadFileLine(FilePtr& File)
 		TmpString.push_back(Char);
 	}
 
+	if (TmpString.empty())
+	{
+		return std::filesystem::path();
+	}
+
+	return std::move(TmpString);
+}
+std::filesystem::path ReadFileLine(FilePtr& File)
+{
+	std::basic_string<TCHAR> TmpString(ReadFileStringLine(File));
+	if (TmpString.empty())
+	{
+		return std::filesystem::path();
+	}
+
 	std::filesystem::path Path = TmpString;
 	Path = std::filesystem::absolute(Path);
 	return std::move(Path);
+}
+std::filesystem::path ReadFileLine(FilePtr& File, bool& bExclude)
+{
+	std::basic_string<TCHAR> TmpString(ReadFileStringLine(File));
+	if (TmpString.empty())
+	{
+		return std::filesystem::path();
+	}
+
+	if (TmpString[0] == _T('~'))
+	{
+		bExclude = true;
+		TmpString = TmpString.substr(1);
+	}
+	else
+	{
+		bExclude = false;
+	}
+
+	std::filesystem::path Path = TmpString;
+	Path = std::filesystem::absolute(Path);
+	return std::move(Path);
+}
+
+bool CheckIfFileContained(const std::deque<std::filesystem::path>& Table, const std::filesystem::path& Path)
+{
+	for (const auto& Compare : Table)
+	{
+		if (std::filesystem::equivalent(Compare, Path))
+		{
+			return true;
+		}
+
+		auto Lhs = Compare.string<TCHAR>();
+		auto Rhs = Path.string<TCHAR>();
+
+		std::transform(Lhs.begin(), Lhs.end(), Lhs.begin(), ::tolower);
+		std::transform(Rhs.begin(), Rhs.end(), Rhs.begin(), ::tolower);
+
+		if (Rhs.starts_with(Lhs))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 
@@ -131,13 +208,6 @@ void ConvertToHash(FilePtr& File, RawHash& Hash)
 	
 	sha512_final(&CTX, Hash.Raw);
 }
-template <typename I> std::string n2hexstr(I w, size_t hex_len = sizeof(I)<<1) {
-	static const char* digits = "0123456789ABCDEF";
-	std::string rc(hex_len,'0');
-	for (size_t i=0, j=(hex_len-1)*4 ; i<hex_len; ++i,j-=4)
-		rc[i] = digits[(w>>j) & 0x0f];
-	return rc;
-}
 std::basic_string<TCHAR> ConvertToString(const RawHash& Hash)
 {
 	static constexpr size_t Len = sizeof(RawHash::Raw) << 1;
@@ -152,6 +222,43 @@ std::basic_string<TCHAR> ConvertToString(const RawHash& Hash)
 
 	return std::move(TmpString);
 }
+bool ConvertToHash(const std::basic_string<TCHAR>& Str, RawHash& Hash)
+{
+	if (Str.length() < (sizeof(RawHash::Raw) << 1))
+		return false;
+	
+	for (size_t i = 0; i < (sizeof(RawHash::Raw) << 1); ++i)
+	{
+		TCHAR Char = Str[i];
+		if (Char >= _T('0') && Char <= _T('9'))
+		{
+			Char -= _T('0');
+		}
+		else if (Char >= _T('a') && Char <= _T('f'))
+		{
+			Char -= _T('a') - 10;
+		}
+		else if (Char >= _T('A') && Char <= _T('F'))
+		{
+			Char -= _T('A') - 10;
+		}
+		else
+		{
+			Char = 0;
+		}
+
+		if (i & 1)
+		{
+			Hash.Raw[i >> 1] |= Char;
+		}
+		else
+		{
+			Hash.Raw[i >> 1] = Char << 4;
+		}
+	}
+
+	return true;
+}
 
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -159,6 +266,7 @@ std::basic_string<TCHAR> ConvertToString(const RawHash& Hash)
 
 void CreateHash(const std::filesystem::path& SrcPath)
 {
+	PathSet PathsToExclude;
 	std::deque<std::filesystem::path> PathsToHashMaking;
 	
 	std::filesystem::path ListPath(SrcPath / ListFileName);
@@ -178,72 +286,121 @@ void CreateHash(const std::filesystem::path& SrcPath)
 		return;
 	}
 
-	SetCurrentDirectory(SrcPath.string<TCHAR>().c_str());
-	while (!feof(ListFile.get()))
 	{
-		std::filesystem::path CurPath = ReadFileLine(ListFile);
-		if (!std::filesystem::exists(CurPath))
+		PushLog(_T("* Read file list to making hash:\n"));
+		
+		SetCurrentDirectory(SrcPath.string<TCHAR>().c_str());
+		while (!feof(ListFile.get()))
 		{
-			PushLog(_T("!!Error: No such file or directory \"%s\"\n"), CurPath.string<TCHAR>().c_str());
-			continue;
-		}
-
-		if (std::filesystem::is_directory(CurPath))
-		{
-			for (auto const& ChildPath : std::filesystem::recursive_directory_iterator{ CurPath }) 
+			bool bExclude;
+			std::filesystem::path CurPath(ReadFileLine(ListFile, bExclude));
+			if (!std::filesystem::exists(CurPath))
 			{
-				if (std::filesystem::is_directory(ChildPath))
-				{
-					continue;
-				}
-				PathsToHashMaking.emplace_back(ChildPath);
+				PushLog(_T("!!Error: No such file or directory \"%s\"\n"), CurPath.string<TCHAR>().c_str());
+				continue;
 			}
-		}
-		else
-		{
-			PathsToHashMaking.emplace_back(std::move(CurPath));
-		}
-	}
 
-	PushLog(_T("* Following files will be hashed:\n"));
-	for (const auto& CurPath : PathsToHashMaking)
-	{
-		PushLog(_T("%s\n"), CurPath.string<TCHAR>().c_str());
-	}
-	PushLog(_T("\n"));
-
-	std::basic_string<TCHAR> TmpString;
-	for (const auto& Path : PathsToHashMaking)
-	{
-		RawHash Hash;
-		{
-			FilePtr CurFile(OpenFile(Path, _T("rb")));
-			if (!CurFile)
+			if (std::filesystem::is_directory(CurPath))
 			{
-				PushLog(_T("!!Error: Cannot open \"%s\"\n"), Path.string<TCHAR>().c_str());
-				memset(Hash.Raw, 0xff, sizeof(RawHash::Raw));
+				for (auto const& ChildPath : std::filesystem::recursive_directory_iterator{ CurPath })
+				{
+					if (std::filesystem::is_directory(ChildPath))
+					{
+						continue;
+					}
+
+					if (bExclude)
+					{
+						PathsToExclude.emplace(ChildPath);
+					}
+					else
+					{
+						PathsToHashMaking.emplace_back(ChildPath);
+					}
+				}
 			}
 			else
 			{
-				ConvertToHash(CurFile, Hash);
+				if (bExclude)
+				{
+					PathsToExclude.emplace(std::move(CurPath));
+				}
+				else
+				{
+					PathsToHashMaking.emplace_back(std::move(CurPath));
+				}
 			}
 		}
+		ListFile.release();
 
-		TmpString = std::filesystem::relative(Path, SrcPath).string<TCHAR>();
-		TmpString += _T("\n");
-		TmpString += ConvertToString(Hash);
-		TmpString += _T("\n");
+		if (PathsToHashMaking.empty())
+		{
+			PushLog(_T("* No file\n"));	
+		}
+		else
+		{
+			PushLog(_T("* %u file(s) found\n"), static_cast<unsigned>(PathsToHashMaking.size()));
+		}
+	}
 
-		_fputts(TmpString.c_str(), HashFile.get());
+	if (PathsToHashMaking.empty())
+	{
+		return;
 	}
 	
-	PushLog(_T("* Done"));
+	{
+		PushLog(_T("* Following files will be hashed:\n"));
+		
+		for (auto It = PathsToHashMaking.begin(); It != PathsToHashMaking.end();)
+		{
+			if (PathsToExclude.find(*It) != PathsToExclude.end())
+			{
+				It = PathsToHashMaking.erase(It);
+			}
+			else
+			{
+				PushLog(_T("%s\n"), It->string<TCHAR>().c_str());
+				++It;
+			}
+		}
+		
+		PushLog(_T("\n"));
+	}
+
+	{
+		PushLog(_T("* Hash making started:\n"));
+		
+		std::basic_string<TCHAR> TmpString;
+		for (const auto& Path : PathsToHashMaking)
+		{
+			RawHash Hash;
+			{
+				FilePtr CurFile(OpenFile(Path, _T("rb")));
+				if (!CurFile)
+				{
+					PushLog(_T("!!Error: Cannot open \"%s\"\n"), Path.string<TCHAR>().c_str());
+					memset(Hash.Raw, 0xff, sizeof(RawHash::Raw));
+				}
+				else
+				{
+					ConvertToHash(CurFile, Hash);
+				}
+			}
+
+			TmpString = std::filesystem::relative(Path, SrcPath).string<TCHAR>();
+			TmpString += _T("\n");
+			TmpString += ConvertToString(Hash);
+			TmpString += _T("\n");
+
+			_fputts(TmpString.c_str(), HashFile.get());
+		}
+
+		PushLog(_T("* Done"));
+	}
 }
 
 void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::path& DestPath)
 {
-	std::deque<std::filesystem::path> PathsToCopy;
-	
 	std::filesystem::path ListPath(SrcPath / ListFileName);
 	FilePtr ListFile(OpenFile(ListPath, _T("r")));
 	if (!ListFile)
@@ -252,39 +409,248 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 		return;
 	}
 
-	SetCurrentDirectory(SrcPath.string<TCHAR>().c_str());
-	while (!feof(ListFile.get()))
+	std::filesystem::path SrcHashPath(SrcPath / HashFileName);
+	FilePtr SrcHashFile(OpenFile(SrcHashPath, _T("r")));
+	if (!SrcHashFile)
 	{
-		std::filesystem::path CurPath = ReadFileLine(ListFile);
-		if (!std::filesystem::exists(CurPath))
-		{
-			PushLog(_T("!!Error: No such file or directory \"%s\"\n"), CurPath.string<TCHAR>().c_str());
-			continue;
-		}
+		PushLog(_T("!!Error: Cannot open \"%s\"\n"), SrcHashPath.string<TCHAR>().c_str());
+		return;
+	}
+	
+	std::filesystem::path DestHashPath(DestPath / HashFileName);
+	FilePtr DestHashFile(OpenFile(DestHashPath, _T("r")));
 
-		if (std::filesystem::is_directory(CurPath))
+	std::deque<std::filesystem::path> ExcludeForDeletion;
+	{
+		PushLog(_T("* Read list for excluding from update:\n"));
+		
+		SetCurrentDirectory(SrcPath.string<TCHAR>().c_str());
+		
+		while (!feof(ListFile.get()))
 		{
-			for (auto const& ChildPath : std::filesystem::recursive_directory_iterator{ CurPath }) 
+			bool bExclude;
+			std::filesystem::path CurPath(ReadFileLine(ListFile, bExclude));
+			if (!bExclude)
 			{
-				PathsToCopy.emplace_back(ChildPath);
+				continue;
 			}
+			std::filesystem::path RelativePath = std::filesystem::relative(CurPath, SrcPath);
+			
+			ExcludeForDeletion.emplace_back(std::move(RelativePath));
+		}
+		ListFile.release();
+
+		if (ExcludeForDeletion.empty())
+		{
+			PushLog(_T("* No files or directories\n"));	
 		}
 		else
 		{
-			PathsToCopy.emplace_back(std::move(CurPath));
+			PushLog(_T("* %u files or directories found\n"), static_cast<unsigned>(ExcludeForDeletion.size()));
 		}
 	}
 
-	PushLog(_T("* Following files will be copied:\n"));
-	for (const auto& CurPath : PathsToCopy)
+	PathMap<RawHash> DestHashes;
+	if (DestHashFile)
 	{
-		PushLog(_T("%s"), CurPath.string<TCHAR>().c_str());
-	}
-	PushLog(_T("\n"));
+		PushLog(_T("* Read destination file hash:\n"));
+		
+		SetCurrentDirectory(DestPath.string<TCHAR>().c_str());
 
+		while (!feof(DestHashFile.get()))
+		{
+			std::filesystem::path CurPath(ReadFileLine(DestHashFile));
+			if (CurPath.empty())
+			{
+				continue;
+			}
+			std::filesystem::path RelativePath = std::filesystem::relative(CurPath, DestPath);
+			if (CheckIfFileContained(ExcludeForDeletion, RelativePath))
+			{
+				continue;
+			}
+
+			RawHash CurHash;
+			if (!ConvertToHash(ReadFileStringLine(DestHashFile), CurHash))
+			{
+				PushLog(_T("!!Error: Invalid hash format \"%s\"\n"), CurPath.string<TCHAR>().c_str());
+				continue;
+			}
+
+			DestHashes.emplace(std::move(RelativePath), std::move(CurHash));
+		}
+		DestHashFile.release();
+
+		if (DestHashes.empty())
+		{
+			PushLog(_T("* No file hash\n"));	
+		}
+		else
+		{
+			PushLog(_T("* %u file hash found\n"), static_cast<unsigned>(DestHashes.size()));
+		}
+	}
+
+	PathMap<RawHash> SrcHashes;
+	{
+		PushLog(_T("* Read source file hash:\n"));
+		
+		SetCurrentDirectory(SrcPath.string<TCHAR>().c_str());
+
+		while (!feof(SrcHashFile.get()))
+		{
+			std::filesystem::path CurPath(ReadFileLine(SrcHashFile));
+			if (CurPath.empty())
+			{
+				continue;
+			}
+			std::filesystem::path RelativePath = std::filesystem::relative(CurPath, SrcPath);
+			if (CheckIfFileContained(ExcludeForDeletion, RelativePath))
+			{
+				continue;
+			}
+
+			RawHash CurHash;
+			if (!ConvertToHash(ReadFileStringLine(SrcHashFile), CurHash))
+			{
+				PushLog(_T("!!Error: Invalid hash format \"%s\"\n"), CurPath.string<TCHAR>().c_str());
+				continue;
+			}
+
+			SrcHashes.emplace(std::move(RelativePath), std::move(CurHash));
+		}
+		SrcHashFile.release();
+
+		if (SrcHashes.empty())
+		{
+			PushLog(_T("* No file hash\n"));	
+		}
+		else
+		{
+			PushLog(_T("* %u file hash found\n"), static_cast<unsigned>(SrcHashes.size()));
+		}
+	}
+
+	{
+		PushLog(_T("* Remove files or directories that no longer exist on source location:\n"));
+
+		size_t NumDeleted = 0;
+		
+		for (auto const& CurPath : std::filesystem::recursive_directory_iterator{ DestPath })
+		{
+			if (std::filesystem::is_directory(CurPath))
+			{
+				continue;
+			}
+
+			std::filesystem::path RelativePath = std::filesystem::relative(CurPath, DestPath);
+
+			if (SrcHashes.find(RelativePath) == SrcHashes.end())
+			{
+				if (std::filesystem::remove(RelativePath))
+				{
+					++NumDeleted;
+					PushLog(_T("%s\n"), RelativePath.string<TCHAR>().c_str());
+				}
+				else
+				{
+					PushLog(_T("!!Error: Failed to remove \"%s\"\n"), RelativePath.string<TCHAR>().c_str());
+				}
+			}
+
+			std::filesystem::path ParentPath = CurPath.path().parent_path();
+			if (std::filesystem::is_directory(ParentPath) && std::filesystem::is_empty(ParentPath))
+			{
+				if (std::filesystem::remove(ParentPath))
+				{
+					++NumDeleted;
+					PushLog(_T("%s\n"), ParentPath.string<TCHAR>().c_str());
+				}
+				else
+				{
+					PushLog(_T("!!Error: Failed to remove \"%s\"\n"), ParentPath.string<TCHAR>().c_str());
+				}
+			}
+		}
+
+		if (NumDeleted <= 0)
+		{
+			PushLog(_T("* No removed file or directory\n"));	
+		}
+		else
+		{
+			PushLog(_T("* %u file or directory has been removed\n"), static_cast<unsigned>(NumDeleted));
+		}
+	}
+
+	{
+		PushLog(_T("* Collect files which need update:\n"));
+		
+		const size_t TotalCount = SrcHashes.size();
+
+		std::vector<std::tuple<PathMap<RawHash>::iterator, bool>> HashesToCompare;
+		HashesToCompare.reserve(TotalCount);
+		for (auto It = SrcHashes.begin(), Et = SrcHashes.end(); It != Et; ++It)
+		{
+			HashesToCompare.emplace_back(std::make_tuple(It, false));
+		}
+		concurrency::parallel_for_each(HashesToCompare.begin(), HashesToCompare.end(), [&DestHashes](decltype(HashesToCompare)::value_type& Wrapped)
+		{
+			auto Found = DestHashes.find(std::get<0>(Wrapped)->first);
+			if (Found == DestHashes.end())
+			{
+				return;
+			}
+
+			if (memcmp(std::get<0>(Wrapped)->second.Raw, Found->second.Raw, sizeof(RawHash::Raw)) != 0)
+			{
+				std::get<1>(Wrapped) = true;
+			}
+		});
+		for (const auto& Wrapped : HashesToCompare)
+		{
+			if (!std::get<1>(Wrapped))
+			{
+				continue;
+			}
+
+			SrcHashes.erase(std::get<0>(Wrapped));
+		}
+
+		const size_t UpdateCount = SrcHashes.size();
+
+		if (UpdateCount <= 0)
+		{
+			PushLog(_T("* No file need update\n"));	
+		}
+		else
+		{
+			PushLog(_T("* (%u/%u) file need update\n"), static_cast<unsigned>(UpdateCount), static_cast<unsigned>(TotalCount));
+		}
+	}
 	
-	
-	PushLog(_T("* Done"));
+	{
+		PushLog(_T("* Update started:\n"));
+
+		for (const auto& Wrapped : SrcHashes)
+		{
+			const std::filesystem::path FromPath = SrcPath / Wrapped.first;
+			const std::filesystem::path ToPath = DestPath / Wrapped.first;
+
+			std::error_code Error;
+			std::filesystem::copy(FromPath, ToPath, std::filesystem::copy_options::overwrite_existing | std::filesystem::copy_options::copy_symlinks, Error);
+			if (Error)
+			{
+				PushLog(_T("!!Error: Failed to copy from \"%s\" to \"%s\"\n"), FromPath.string<TCHAR>().c_str(), ToPath.string<TCHAR>().c_str());
+			}
+			else
+			{
+				PushLog(_T("File copied from \"%s\" to \"%s\"\n"), FromPath.string<TCHAR>().c_str(), ToPath.string<TCHAR>().c_str());
+			}
+		}
+
+		PushLog(_T("* Done"));
+	}
 }
 
 
