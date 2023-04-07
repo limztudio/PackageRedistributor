@@ -542,6 +542,38 @@ void CreateHash(const std::filesystem::path& SrcPath)
 						continue;
 					}
 
+					const std::filesystem::path RelativeChildPath = std::filesystem::relative(ChildPath, SrcPath, Error);
+					if (Error)
+					{
+						PushLog(_T("!!Error: Failed to calculate relative path of \"%s\"\n"), ChildPath.path().string<TCHAR>().c_str());
+						++LocalErrorCount;
+						continue;
+					}
+
+					bool bEqual = std::filesystem::equivalent(RelativeChildPath, HashFileName, Error);
+					if (Error)
+					{
+						PushLog(_T("!!Error: Failed to check if \"%s\" is \"%s\"\n"), RelativeChildPath.string<TCHAR>().c_str(), HashFileName);
+						++LocalErrorCount;
+						continue;
+					}
+					if (bEqual)
+					{
+						continue;
+					}
+
+					bEqual = std::filesystem::equivalent(RelativeChildPath, LogFileName, Error);
+					if (Error)
+					{
+						PushLog(_T("!!Error: Failed to check if \"%s\" is \"%s\"\n"), RelativeChildPath.string<TCHAR>().c_str(), LogFileName);
+						++LocalErrorCount;
+						continue;
+					}
+					if (bEqual)
+					{
+						continue;
+					}
+
 					if (bExclude)
 					{
 						PathsToExclude.emplace(ChildPath);
@@ -894,10 +926,22 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 				continue;
 			}
 
-			const bool bEqual = std::filesystem::equivalent(RelativePath, HashFileName, Error);
+			bool bEqual = std::filesystem::equivalent(RelativePath, HashFileName, Error);
 			if (Error)
 			{
 				PushLog(_T("!!Error: Failed to check if \"%s\" is \"%s\"\n"), RelativePath.string<TCHAR>().c_str(), HashFileName);
+				++LocalErrorCount;
+				continue;
+			}
+			if (bEqual)
+			{
+				continue;
+			}
+
+			bEqual = std::filesystem::equivalent(RelativePath, LogFileName, Error);
+			if (Error)
+			{
+				PushLog(_T("!!Error: Failed to check if \"%s\" is \"%s\"\n"), RelativePath.string<TCHAR>().c_str(), LogFileName);
 				++LocalErrorCount;
 				continue;
 			}
@@ -1263,7 +1307,7 @@ int _tmain(int Argc, TCHAR* Argv[])
 			return -1;
 		}
 
-		std::filesystem::path LogPath(SrcPath / LogFileName);
+		std::filesystem::path LogPath(DestPath / LogFileName);
 		if(!CreateLog(LogPath))
 		{
 			_tprintf_s(_T("!!Error: Cannot open/create \"%s\"\n"), LogPath.string<TCHAR>().c_str());
