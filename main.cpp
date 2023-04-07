@@ -297,6 +297,8 @@ bool CheckIfFileContained(const std::deque<std::filesystem::path>& Table, const 
 
 bool BufferFileCopy(const std::filesystem::path& FromPath, const std::filesystem::path& ToPath)
 {
+	std::error_code Error;
+	
 	FilePtr FromFile(FromPath.string<TCHAR>().c_str(), _T("rb"));
 	if (!FromFile)
 	{
@@ -304,8 +306,44 @@ bool BufferFileCopy(const std::filesystem::path& FromPath, const std::filesystem
 		return false;
 	}
 
+	bool bShouldCreate = true;
+	const std::filesystem::path ToParentPath = ToPath.parent_path();
+	const bool bExists = std::filesystem::exists(ToParentPath, Error);
+	if (Error)
+	{
+		PushLog(_T("!!Error: Error occurred while checking if \"%s\" exists\n"), ToParentPath.string<TCHAR>().c_str());
+		return false;
+	}
+	if (bExists)
+	{
+		const bool bIsDirectory = std::filesystem::is_directory(ToParentPath, Error);
+		if (Error)
+		{
+			PushLog(_T("!!Error: Error occurred while checking if \"%s\" is a directory\n"), ToParentPath.string<TCHAR>().c_str());
+			return false;
+		}
+		if (bIsDirectory)
+		{
+			bShouldCreate = false;
+		}
+	}
+	if (bShouldCreate)
+	{
+		const bool bCreateDirectory = std::filesystem::create_directories(ToParentPath, Error);
+		if (Error)
+		{
+			PushLog(_T("!!Error: Error occurred while creating directory \"%s\"\n"), ToParentPath.string<TCHAR>().c_str());
+			return false;
+		}
+		if (!bCreateDirectory)
+		{
+			PushLog(_T("!!Error: Failed to create directory \"%s\"\n"), ToParentPath.string<TCHAR>().c_str());
+			return false;
+		}
+	}
+
 	FilePtr ToFile(ToPath.string<TCHAR>().c_str(), _T("wb"));
-	if (!FromFile)
+	if (!ToFile)
 	{
 		PushLog(_T("!!Error: Cannot open \"%s\"\n"), ToPath.string<TCHAR>().c_str());
 		return false;
@@ -430,7 +468,7 @@ void CreateHash(const std::filesystem::path& SrcPath)
 	std::deque<std::filesystem::path> PathsToHashMaking;
 	
 	const std::filesystem::path ListPath(SrcPath / ListFileName);
-	FilePtr ListFile(ListPath, _T("r"));
+	FilePtr ListFile(ListPath, _T("rt, ccs=UTF-8"));
 	if (!ListFile)
 	{
 		PushLog(_T("!!Error: Cannot open \"%s\"\n"), ListPath.string<TCHAR>().c_str());
@@ -445,7 +483,7 @@ void CreateHash(const std::filesystem::path& SrcPath)
 		return;
 	}
 	
-	FilePtr HashFile(HashPath, _T("w"));
+	FilePtr HashFile(HashPath, _T("wt, ccs=UTF-8"));
 	if (!HashFile)
 	{
 		PushLog(_T("!!Error: Cannot open \"%s\"\n"), HashPath.string<TCHAR>().c_str());
@@ -455,7 +493,7 @@ void CreateHash(const std::filesystem::path& SrcPath)
 	size_t TotalErrorCount = 0;
 
 	{
-		PushLog(_T("* Read file list to making hash:\n"));
+		PushLog(_T("\n* Read file list to making hash:\n"));
 		size_t LocalErrorCount = 0;
 		
 		SetCurrentDirectory(SrcPath.string<TCHAR>().c_str());
@@ -463,6 +501,10 @@ void CreateHash(const std::filesystem::path& SrcPath)
 		{
 			bool bExclude;
 			std::filesystem::path CurPath(ReadFileLine(ListFile, bExclude));
+			if (CurPath.empty())
+			{
+				continue;
+			}
 			const bool bExists = std::filesystem::exists(CurPath, Error);
 			if (Error)
 			{
@@ -549,7 +591,7 @@ void CreateHash(const std::filesystem::path& SrcPath)
 	}
 	
 	{
-		PushLog(_T("* Following files will be hashed:\n"));
+		PushLog(_T("\n* Following files will be hashed:\n"));
 		
 		for (auto It = PathsToHashMaking.begin(); It != PathsToHashMaking.end();)
 		{
@@ -568,7 +610,7 @@ void CreateHash(const std::filesystem::path& SrcPath)
 	}
 
 	{
-		PushLog(_T("* Hash making started:\n"));
+		PushLog(_T("\n* Hash making started:\n"));
 		size_t LocalErrorCount = 0;
 		
 		std::basic_string<TCHAR> TmpString;
@@ -625,11 +667,11 @@ void CreateHash(const std::filesystem::path& SrcPath)
 
 	if (TotalErrorCount > 0)
 	{
-		PushLog(_T("* %u error occurred in total\n"), static_cast<unsigned>(TotalErrorCount));
+		PushLog(_T("\n* %u error occurred in total\n"), static_cast<unsigned>(TotalErrorCount));
 	}
 	else
 	{
-		PushLog(_T("* All tasks done successfully\n"));
+		PushLog(_T("\n* All tasks done successfully\n"));
 	}
 }
 
@@ -638,7 +680,7 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 	std::error_code Error;
 	
 	const std::filesystem::path ListPath(SrcPath / ListFileName);
-	FilePtr ListFile(ListPath, _T("r"));
+	FilePtr ListFile(ListPath, _T("rt, ccs=UTF-8"));
 	if (!ListFile)
 	{
 		PushLog(_T("!!Error: Cannot open \"%s\"\n"), ListPath.string<TCHAR>().c_str());
@@ -646,7 +688,7 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 	}
 
 	const std::filesystem::path SrcHashPath(SrcPath / HashFileName);
-	FilePtr SrcHashFile(SrcHashPath, _T("r"));
+	FilePtr SrcHashFile(SrcHashPath, _T("rt, ccs=UTF-8"));
 	if (!SrcHashFile)
 	{
 		PushLog(_T("!!Error: Cannot open \"%s\"\n"), SrcHashPath.string<TCHAR>().c_str());
@@ -654,13 +696,13 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 	}
 	
 	const std::filesystem::path DestHashPath(DestPath / HashFileName);
-	FilePtr DestHashFile(DestHashPath, _T("r"));
+	FilePtr DestHashFile(DestHashPath, _T("rt, ccs=UTF-8"));
 
 	size_t TotalErrorCount = 0;
 
 	std::deque<std::filesystem::path> ExcludeForDeletion;
 	{
-		PushLog(_T("* Read list for excluding from update:\n"));
+		PushLog(_T("\n* Read list for excluding from update:\n"));
 		size_t LocalErrorCount = 0;
 		
 		SetCurrentDirectory(SrcPath.string<TCHAR>().c_str());
@@ -669,6 +711,10 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 		{
 			bool bExclude;
 			std::filesystem::path CurPath(ReadFileLine(ListFile, bExclude));
+			if (CurPath.empty())
+			{
+				continue;
+			}
 			if (!bExclude)
 			{
 				continue;
@@ -691,7 +737,7 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 
 		if (ExcludeForDeletion.empty())
 		{
-			PushLog(_T("* No files or directories\n"));	
+			PushLog(_T("* No files or directories\n"));
 		}
 		else
 		{
@@ -702,7 +748,7 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 	PathMap<RawHash> DestHashes;
 	if (DestHashFile)
 	{
-		PushLog(_T("* Read destination file hash:\n"));
+		PushLog(_T("\n* Read destination file hash:\n"));
 		size_t LocalErrorCount = 0;
 		
 		SetCurrentDirectory(DestPath.string<TCHAR>().c_str());
@@ -759,7 +805,7 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 
 	PathMap<RawHash> SrcHashes;
 	{
-		PushLog(_T("* Read source file hash:\n"));
+		PushLog(_T("\n* Read source file hash:\n"));
 		size_t LocalErrorCount = 0;
 		
 		SetCurrentDirectory(SrcPath.string<TCHAR>().c_str());
@@ -815,7 +861,7 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 	}
 
 	{
-		PushLog(_T("* Remove files or directories that no longer exist on source location:\n"));
+		PushLog(_T("\n* Remove files or directories that no longer exist on source location:\n"));
 		size_t LocalErrorCount = 0;
 		
 		size_t NumDeleted = 0;
@@ -844,6 +890,18 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 				continue;
 			}
 			if (CheckIfFileContained(ExcludeForDeletion, RelativePath))
+			{
+				continue;
+			}
+
+			const bool bEqual = std::filesystem::equivalent(RelativePath, HashFileName, Error);
+			if (Error)
+			{
+				PushLog(_T("!!Error: Failed to check if \"%s\" is \"%s\"\n"), RelativePath.string<TCHAR>().c_str(), HashFileName);
+				++LocalErrorCount;
+				continue;
+			}
+			if (bEqual)
 			{
 				continue;
 			}
@@ -953,44 +1011,47 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 	}
 
 	{
-		PushLog(_T("* Collect files which need update:\n"));
+		PushLog(_T("\n* Collect files which need update:\n"));
 		
 		const size_t TotalCount = SrcHashes.size();
 
-		std::vector<std::tuple<PathMap<RawHash>::iterator, bool>> HashesToCompare;
-		HashesToCompare.reserve(TotalCount);
-		for (auto It = SrcHashes.begin(), Et = SrcHashes.end(); It != Et; ++It)
+		if (!DestHashes.empty())
 		{
-			HashesToCompare.emplace_back(std::make_tuple(It, false));
-		}
-		concurrency::parallel_for_each(HashesToCompare.begin(), HashesToCompare.end(), [&DestHashes](decltype(HashesToCompare)::value_type& Wrapped)
-		{
-			auto Found = DestHashes.find(std::get<0>(Wrapped)->first);
-			if (Found == DestHashes.end())
+			std::vector<std::tuple<PathMap<RawHash>::iterator, bool>> HashesToCompare;
+			HashesToCompare.reserve(TotalCount);
+			for (auto It = SrcHashes.begin(), Et = SrcHashes.end(); It != Et; ++It)
 			{
-				return;
+				HashesToCompare.emplace_back(std::make_tuple(It, false));
 			}
+			concurrency::parallel_for_each(HashesToCompare.begin(), HashesToCompare.end(), [&DestHashes](decltype(HashesToCompare)::value_type& Wrapped)
+			{
+				auto Found = DestHashes.find(std::get<0>(Wrapped)->first);
+				if (Found == DestHashes.end())
+				{
+					return;
+				}
 
-			if (memcmp(std::get<0>(Wrapped)->second.Raw, Found->second.Raw, sizeof(RawHash::Raw)) != 0)
+				if (memcmp(std::get<0>(Wrapped)->second.Raw, Found->second.Raw, sizeof(RawHash::Raw)) == 0)
+				{
+					std::get<1>(Wrapped) = true;
+				}
+			});
+			for (const auto& Wrapped : HashesToCompare)
 			{
-				std::get<1>(Wrapped) = true;
-			}
-		});
-		for (const auto& Wrapped : HashesToCompare)
-		{
-			if (!std::get<1>(Wrapped))
-			{
-				continue;
-			}
+				if (!std::get<1>(Wrapped))
+				{
+					continue;
+				}
 
-			SrcHashes.erase(std::get<0>(Wrapped));
+				SrcHashes.erase(std::get<0>(Wrapped));
+			}
 		}
 
 		const size_t UpdateCount = SrcHashes.size();
 
 		if (UpdateCount <= 0)
 		{
-			PushLog(_T("* No file need update\n"));	
+			PushLog(_T("* No files need update\n"));	
 		}
 		else
 		{
@@ -998,8 +1059,9 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 		}
 	}
 	
+	if (!SrcHashes.empty())
 	{
-		PushLog(_T("* Update started:\n"));
+		PushLog(_T("\n* Update started:\n"));
 		size_t LocalErrorCount = 0;
 
 		for (const auto& Wrapped : SrcHashes)
@@ -1028,25 +1090,35 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 				FromPath = std::move(OrgPath);
 			}
 
-			bIsSymbolic = std::filesystem::is_symlink(ToPath, Error);
+			const bool bExists = std::filesystem::exists(ToPath, Error);
 			if (Error)
 			{
-				PushLog(_T("!!Error: Failed to check if \"%s\" symbolic link\n"), ToPath.string<TCHAR>().c_str());
+				PushLog(_T("!!Error: Cannot check the existence of \"%s\"\n"), ToPath.string<TCHAR>().c_str());
 				++LocalErrorCount;
 				continue;
 			}
-			if (bIsSymbolic)
+			if (bExists)
 			{
-				std::filesystem::path OrgPath = std::filesystem::read_symlink(ToPath, Error);
+				bIsSymbolic = std::filesystem::is_symlink(ToPath, Error);
 				if (Error)
 				{
-					PushLog(_T("!!Error: Failed to read symbolic link \"%s\"\n"), ToPath.string<TCHAR>().c_str());
+					PushLog(_T("!!Error: Failed to check if \"%s\" symbolic link\n"), ToPath.string<TCHAR>().c_str());
 					++LocalErrorCount;
 					continue;
 				}
+				if (bIsSymbolic)
+				{
+					std::filesystem::path OrgPath = std::filesystem::read_symlink(ToPath, Error);
+					if (Error)
+					{
+						PushLog(_T("!!Error: Failed to read symbolic link \"%s\"\n"), ToPath.string<TCHAR>().c_str());
+						++LocalErrorCount;
+						continue;
+					}
 
-				PushLog(_T("Symbolic link conversion: \"%s\" to \"%s\"\n"), ToPath.string<TCHAR>().c_str(), OrgPath.string<TCHAR>().c_str());
-				ToPath = std::move(OrgPath);
+					PushLog(_T("Symbolic link conversion: \"%s\" to \"%s\"\n"), ToPath.string<TCHAR>().c_str(), OrgPath.string<TCHAR>().c_str());
+					ToPath = std::move(OrgPath);
+				}
 			}
 			
 			if (!BufferFileCopy(FromPath, ToPath))
@@ -1071,7 +1143,7 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 
 	if (TotalErrorCount <= 0)
 	{
-		PushLog(_T("* Update hash list:\n"));
+		PushLog(_T("\n* Update hash list:\n"));
 		size_t LocalErrorCount = 0;
 		
 		const std::filesystem::path FromPath = SrcPath / HashFileName;
@@ -1097,11 +1169,11 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 
 	if (TotalErrorCount > 0)
 	{
-		PushLog(_T("* %u error occurred in total\n"), static_cast<unsigned>(TotalErrorCount));
+		PushLog(_T("\n* %u error occurred in total\n"), static_cast<unsigned>(TotalErrorCount));
 	}
 	else
 	{
-		PushLog(_T("* All tasks done successfully\n"));
+		PushLog(_T("\n* All tasks done successfully\n"));
 	}
 }
 
@@ -1112,6 +1184,8 @@ void CopyPackage(const std::filesystem::path& SrcPath, const std::filesystem::pa
 int _tmain(int Argc, TCHAR* Argv[])
 {
 	std::error_code Error;
+
+	std::locale::global(std::locale(".UTF-8"));
 	
 	switch(Argc)
 	{
@@ -1158,7 +1232,7 @@ int _tmain(int Argc, TCHAR* Argv[])
 			_tprintf_s(_T("!!Error: Error occurred while canonicalizing \"%s\"\n"), Argv[1]);
 			return -1;
 		}
-		const bool bIsDirectory = std::filesystem::is_directory(SrcPath, Error);
+		bool bIsDirectory = std::filesystem::is_directory(SrcPath, Error);
 		if (Error)
 		{
 			_tprintf_s(_T("!!Error: Cannot check if \"%s\" directory\n"), SrcPath.string<TCHAR>().c_str());
@@ -1177,6 +1251,17 @@ int _tmain(int Argc, TCHAR* Argv[])
 			_tprintf_s(_T("!!Error: Error occurred while canonicalizing \"%s\"\n"), Argv[2]);
 			return -1;
 		}
+		bIsDirectory = std::filesystem::is_directory(DestPath, Error);
+		if (Error)
+		{
+			_tprintf_s(_T("!!Error: Cannot check if \"%s\" directory\n"), DestPath.string<TCHAR>().c_str());
+			return -1;
+		}
+		if (!bIsDirectory)
+		{
+			_tprintf_s(_T("!!Error: No such directory \"%s\"\n"), DestPath.string<TCHAR>().c_str());
+			return -1;
+		}
 
 		std::filesystem::path LogPath(SrcPath / LogFileName);
 		if(!CreateLog(LogPath))
@@ -1192,9 +1277,11 @@ int _tmain(int Argc, TCHAR* Argv[])
 	break;
 
 	default:
+	{
 		_tprintf_s(_T("exe [src]: Read copy list named \"%s\"\n"), ListFileName);
 		_tprintf_s(_T("exe [src] [dest]: Copy \"Src\" into \"Dest\" based on \"%s\" which defined at \"Src\". By comparing hash value, only different file will be updated.\n"), ListFileName);
-		return -1;
+	}
+	break;
 	}
 	
 	return 0;
